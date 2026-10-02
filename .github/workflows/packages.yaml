@@ -58,7 +58,7 @@ jobs:
         id: check
         run: |
           sha=$(git -C "$SRC" rev-parse --short=7 HEAD)
-          last=$(jq -r '.latest.commit // ""' packages/built.json 2>/dev/null || true)
+          last=$(jq -r '.commit // ""' packages/built.json 2>/dev/null || true)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           if [ "$sha" = "$last" ]; then
             echo "$sha is already built"; echo "new=0" >> "$GITHUB_OUTPUT"
@@ -86,11 +86,9 @@ jobs:
           step wql bash -c 'cd packages/wql && bun run build'
           step sdk bash -c 'cd packages/sdk && bun run build'
 
-      - name: Strip source maps, pin the sdk to this build's wql
+      - name: Strip source maps, point the sdk at the wql tarball
         if: steps.check.outputs.new == '1'
         working-directory: /tmp/wyndb-src
-        env:
-          SHA: ${{ steps.check.outputs.sha }}
         run: |
           for dist in packages/wql/dist packages/sdk/dist; do
             find "$dist" -name '*.map' -delete
@@ -98,7 +96,7 @@ jobs:
           done
           wql=$(jq -r .version packages/wql/dist/package.json)
           m=packages/sdk/dist/package.json
-          jq --arg url "$BASE_URL/wyndbase-wql-$wql.$SHA.tgz" \
+          jq --arg url "$BASE_URL/wyndbase-wql-$wql.tgz" \
             'if .dependencies["@wyndbase/wql"] then .dependencies["@wyndbase/wql"] = $url else . end' "$m" > "$m.tmp" && mv "$m.tmp" "$m"
 
       - name: Refuse anything that carries source
@@ -114,7 +112,7 @@ jobs:
           done
           echo "no source in either tarball"
 
-      # <name>-<version>.<sha>.tgz is written once; <name>-<version>.tgz always follows the latest build.
+      # One URL per version; each build of a new commit replaces it.
       - name: Pack
         id: pack
         if: steps.check.outputs.new == '1'
@@ -122,37 +120,26 @@ jobs:
           SHA: ${{ steps.check.outputs.sha }}
           REF: ${{ inputs.ref || 'dev' }}
         run: |
-          mkdir -p /tmp/wyndb-pack
           for p in wql sdk; do
             v=$(jq -r .version "$SRC/packages/$p/dist/package.json")
-            pinned="wyndbase-$p-$v.$SHA.tgz"
-            if [ -f "packages/$pinned" ]; then echo "::error::$pinned already exists"; exit 1; fi
-            name=$(cd "$SRC/packages/$p/dist" && npm pack --json --pack-destination /tmp/wyndb-pack 2>/dev/null | jq -r '.[0].filename')
-            cp "/tmp/wyndb-pack/$name" "packages/$pinned"
-            cp "/tmp/wyndb-pack/$name" "packages/wyndbase-$p-$v.tgz"
-            echo "packed $pinned and wyndbase-$p-$v.tgz"
+            name=$(cd "$SRC/packages/$p/dist" && npm pack --json --pack-destination "$GITHUB_WORKSPACE/packages" 2>/dev/null | jq -r '.[0].filename')
+            echo "packed $name"
             declare "v_$p=$v"
           done
-          prev=$(cat packages/built.json 2>/dev/null || echo '{}')
-          jq -n --argjson prev "$prev" --arg commit "$SHA" --arg ref "$REF" --arg date "$(date -u +%FT%TZ)" \
-            --arg wql "$v_wql" --arg sdk "$v_sdk" \
-            '{commit:$commit, ref:$ref, date:$date, wql:$wql, sdk:$sdk} as $b | {latest:$b, history:([$b] + ($prev.history // []))}' \
-            > packages/built.json
+          jq -n --arg commit "$SHA" --arg ref "$REF" --arg date "$(date -u +%FT%TZ)" --arg wql "$v_wql" --arg sdk "$v_sdk" \
+            '{commit:$commit, ref:$ref, date:$date, wql:$wql, sdk:$sdk}' > packages/built.json
           echo "published=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Index and commit
         if: steps.pack.outputs.published != ''
         run: |
           jq -r --arg base "$BASE_URL" '
-            def link($f): "<a href=\"\($f)\">\($f)</a>";
             "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
-            "<title>wyndbase packages</title><style>body{font:15px/1.6 system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem}code{background:#f3f3f3;padding:.1rem .3rem;border-radius:4px;word-break:break-all}td{padding:.2rem .6rem .2rem 0;vertical-align:top}</style>",
+            "<title>wyndbase packages</title><style>body{font:15px/1.6 system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem}code{background:#f3f3f3;padding:.1rem .3rem;border-radius:4px;word-break:break-all}</style>",
             "<h1>wyndbase packages</h1>",
-            "<h2>Latest</h2><p>Always the newest build of <code>\(.latest.ref)</code> (\(.latest.commit), \(.latest.date)). Its content changes, so lockfiles pinning it will break on rebuild.</p>",
-            "<p><code>bun add \($base)/wyndbase-sdk-\(.latest.sdk).tgz</code></p>",
-            "<h2>Pinned builds</h2><p>Never change once written; safe for lockfiles.</p><table>",
-            (.history[] | "<tr><td>\(.date[0:16])</td><td>\(.commit)</td><td>\(link("wyndbase-sdk-\(.sdk).\(.commit).tgz"))<br>\(link("wyndbase-wql-\(.wql).\(.commit).tgz"))</td></tr>"),
-            "</table>"
+            "<p><code>bun add \($base)/wyndbase-sdk-\(.sdk).tgz</code></p>",
+            "<ul><li><a href=\"wyndbase-sdk-\(.sdk).tgz\">wyndbase-sdk-\(.sdk).tgz</a></li><li><a href=\"wyndbase-wql-\(.wql).tgz\">wyndbase-wql-\(.wql).tgz</a></li></ul>",
+            "<p><small>Built from \(.ref) @ \(.commit), \(.date)</small></p>"
           ' packages/built.json > packages/index.html
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
