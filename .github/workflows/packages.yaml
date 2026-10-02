@@ -81,6 +81,7 @@ jobs:
         run: |
           step() { local name=$1; shift; "$@" > "$LOGS/$name.log" 2>&1 || { echo "::error::$name failed (log withheld: public repo)"; exit 1; }; echo "$name ok"; }
           step install bun install --frozen-lockfile
+          step typegen bun run typegen
           step wql bash -c 'cd packages/wql && bun run build'
           step sdk bash -c 'cd packages/sdk && bun run build'
 
